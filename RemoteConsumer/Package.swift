@@ -11,7 +11,7 @@ let package = Package(
         .binaryTarget(
             name: "DemoMacros",
             url: "https://github.com/0xTim/swift-binary-macros-poc/releases/download/v1.0.0/DemoMacros.artifactbundle.zip",
-            checksum: "0423f9e9998b980f57c5c1f631a79cf76996359558ce7e3e95e4495f6b629f8f"
+            checksum: "263d88b986a14c5ac3c43abf060da412abddbe6dca6cb4210bd4254fc6a4efbb"
         ),
         .executableTarget(name: "App", dependencies: ["DemoMacros"]),
     ]
