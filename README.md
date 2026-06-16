@@ -5,8 +5,9 @@ A proof-of-concept showing that a Swift **macro implementation** can be shipped 
 with a plain `.binaryTarget(url:checksum:)`, exactly like a binary XCFramework — instead of
 recompiling the macro (and `swift-syntax`) from source in every consumer.
 
-This requires small additions to **SwiftPM** and the **swift-build** engine (patches included);
-it is the basis for an upstream proposal.
+This requires small additions to **SwiftPM** and the **swift-build** engine (see [swift-build](https://github.com/swiftlang/swift-build/pull/1460) and [SwiftPM](https://github.com/swiftlang/swift-package-manager/pull/10210)).
+
+Forum post is here.
 
 ## Why a separate artifact (and not "inside the XCFramework")?
 
@@ -46,18 +47,6 @@ the target). The XCFramework format has no slot for a host tool — so the imple
 SwiftPM selects the variant matching the **host** performing the build and passes it to the
 compiler with `-load-plugin-executable <path>#DemoMacros`.
 
-## The toolchain changes
-
-Two small changes, available as branches on these forks (and as patches in `patches/`):
-
-- **[0xTim/swift-package-manager `feature/binary-macro-artifact-targets`](https://github.com/0xTim/swift-package-manager/tree/feature/binary-macro-artifact-targets)**
-  — adds the `macro` artifact type, selects the host variant, and emits
-  `-load-plugin-executable` for both the native build engine and the SwiftBuild PIF bridge
-  (`SWIFT_LOAD_BINARY_MACROS`).
-- **[0xTim/swift-build `feature/binary-macro-artifact-targets`](https://github.com/0xTim/swift-build/tree/feature/binary-macro-artifact-targets)**
-  — one line: registers `SWIFT_LOAD_BINARY_MACROS` as a known PIF build setting so it survives
-  PIF encode/decode.
-
 ## Trying it out
 
 ### 1. Build the patched SwiftPM CLI
@@ -92,17 +81,5 @@ Scripts/build-bundle.sh                      # builds dist/DemoMacros.artifactbu
 Both consumers only **declare** `#stringify` and use it; the implementation is loaded from the
 binary bundle via `-load-plugin-executable`. The local flow (a) is the most robust because the
 plugin is built with your own toolchain; the remote flow (b) demonstrates distribution but
-expects a toolchain compatible with the one that built the released binary (see compiler-version
-keying below).
-
-## Status / open questions
-
-- Verified end-to-end on macOS (arm64) and Linux (aarch64), with both the native and the
-  default SwiftBuild build engines.
-- **Compiler-version keying:** macro plugins talk to the compiler over a version-specific
-  protocol, so a published bundle is toolchain-specific. Variants are keyed by triple only; a
-  robust solution should also key on compiler version (cf. swift-syntax prebuilts).
-- The SwiftBuild side currently avoids registering the macro bundle as a build file (so the
-  engine's artifact parser never sees the new type); teaching the parser directly is an
-  alternative worth discussing.
-- Upstreaming is two coordinated PRs (swift-package-manager + swift-build) plus tests.
+expects a toolchain compatible with the one that built the released binary. In the real world,
+you'd declare the macros in an XCFramework and ship it alongside.
