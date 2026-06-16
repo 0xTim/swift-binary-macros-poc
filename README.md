@@ -48,33 +48,52 @@ compiler with `-load-plugin-executable <path>#DemoMacros`.
 
 ## The toolchain changes
 
-Apply the patches in `patches/` to the respective repos and build the CLI / a toolchain:
+Two small changes, available as branches on these forks (and as patches in `patches/`):
 
-- `patches/swift-package-manager.diff` — adds the `macro` artifact type, selects the host
-  variant, and emits `-load-plugin-executable` for both the native build engine and the
-  SwiftBuild PIF bridge (`SWIFT_LOAD_BINARY_MACROS`).
-- `patches/swift-build.diff` — one line: registers `SWIFT_LOAD_BINARY_MACROS` as a known PIF
-  build setting so it survives PIF encode/decode.
+- **[0xTim/swift-package-manager `feature/binary-macro-artifact-targets`](https://github.com/0xTim/swift-package-manager/tree/feature/binary-macro-artifact-targets)**
+  — adds the `macro` artifact type, selects the host variant, and emits
+  `-load-plugin-executable` for both the native build engine and the SwiftBuild PIF bridge
+  (`SWIFT_LOAD_BINARY_MACROS`).
+- **[0xTim/swift-build `feature/binary-macro-artifact-targets`](https://github.com/0xTim/swift-build/tree/feature/binary-macro-artifact-targets)**
+  — one line: registers `SWIFT_LOAD_BINARY_MACROS` as a known PIF build setting so it survives
+  PIF encode/decode.
 
-Build the patched SwiftPM CLI, then use its `swift build` / `swift run`.
+## Trying it out
 
-## Try it
+### 1. Build the patched SwiftPM CLI
+
+Clone the two forks side by side and point SwiftPM at the local `swift-build` fork (the engine
+change lives there), then build just the `swift-run` product (tested with a Swift 6.4 toolchain):
 
 ```bash
-# 1. Build the bundle for your host (run on macOS and Linux to accumulate both):
-Scripts/build-bundle.sh            # prints the SwiftPM checksum
+git clone -b feature/binary-macro-artifact-targets https://github.com/0xTim/swift-package-manager.git
+git clone -b feature/binary-macro-artifact-targets https://github.com/0xTim/swift-build.git
 
-# 2a. Consume locally:
-<patched>/swift run --package-path Consumer App
-#    -> value=42 source=40 + 2
+cd swift-package-manager
+swift package edit swift-build --path ../swift-build   # use the patched engine
+swift build --product swift-run
+export SR="$(swift build --product swift-run --show-bin-path)/swift-run"
+cd ..
+```
 
-# 2b. Or consume the published release (remote url + checksum), no local artifact:
-<patched>/swift run --package-path RemoteConsumer App
-#    -> value=42 source=40 + 2
+### 2. Consume the macro
+
+```bash
+cd swift-binary-macros-poc
+
+# (a) Local flow — build the bundle with YOUR toolchain, then consume it by path:
+Scripts/build-bundle.sh                      # builds dist/DemoMacros.artifactbundle (+ prints checksum)
+"$SR" --package-path Consumer App            # -> value=42 source=40 + 2
+
+# (b) Remote flow — pull the published GitHub release by url + checksum (no local artifact):
+"$SR" --package-path RemoteConsumer App      # -> value=42 source=40 + 2
 ```
 
 Both consumers only **declare** `#stringify` and use it; the implementation is loaded from the
-binary bundle.
+binary bundle via `-load-plugin-executable`. The local flow (a) is the most robust because the
+plugin is built with your own toolchain; the remote flow (b) demonstrates distribution but
+expects a toolchain compatible with the one that built the released binary (see compiler-version
+keying below).
 
 ## Status / open questions
 
