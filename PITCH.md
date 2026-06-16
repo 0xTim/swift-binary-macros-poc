@@ -14,17 +14,15 @@ library's module interface.
 
 ## Motivation
 
-Macros are increasingly part of library and SDK public API. But a macro is two halves:
+Macros are increasingly part of library and SDK public APIs. But a macro is two halves:
 
-| Half | What it is | How it ships today |
-|---|---|---|
-| **Declaration** (`macro foo(...) = #externalMacro(module: "FooMacros", ...)`) | Pure API surface | already distributable in a `.swiftinterface` (incl. inside an XCFramework) |
-| **Implementation** (`struct FooMacro: ...`) | A **compiler-plugin executable** run by the compiler at build time | **only** as a `.macro` target compiled from source |
+* The declaration - `macro foo(...) = #externalMacro(module: "FooMacros", ...)`; this is just the API and _can_ be distributed inside an XCFramework or any other `.swiftinterface`
+* The implementation - `struct FooMacro: ...`; this is the executable run by the compiler at build time. Currently this can only be compiled from source
 
 This creates two problems:
 
-1. **Binary SDKs can't ship macros at all.** A vendor distributing precompiled frameworks
-   (XCFrameworks) can put the macro *declaration* in the `.swiftinterface`, but has nowhere to
+1. **Binary SDKs can't ship macros at all.** A vendor distributing precompiled XCFrameworks can
+   put the macro *declaration* in the `.swiftinterface`, but has nowhere to
    put the *implementation*. In practice they must publish the macro **source** in a separate,
    consumer-facing package and have every consumer recompile it — duplicating and re-maintaining
    the macro in two places. This pitch comes directly out of a real SDK that ships as
@@ -83,24 +81,14 @@ uses for a source-built `.macro` target. The macro **declaration** still comes f
 
 ## Detailed design
 
-The change is intentionally small and reuses existing infrastructure (artifact-bundle host-triple
-selection; the compiler's existing plugin-loading path).
+The change for this was actually pretty small and reuses a lot of existing infrastructure to make it work. The changes affect `swift build` and `swift-package-manager`:
 
-**SwiftPM** ([fork](https://github.com/0xTim/swift-package-manager/tree/feature/binary-macro-artifact-targets)):
-- `ArtifactsArchiveMetadata.ArtifactType.macro` — declarable in `info.json`.
-- `BinaryModule.containsMacro` and `parseMacroArtifactArchives(for:)` — host-triple variant
-  selection, mirroring the existing `executable` handling.
-- **Native build engine**: a Swift target that depends on a macro binary target emits
-  `-load-plugin-executable <hostVariant>#<module>` for it, identical to a source macro.
-- **SwiftBuild engine**: sets the `SWIFT_LOAD_BINARY_MACROS` build setting on the consuming
-  target (the engine already turns that into `-load-plugin-executable`).
+* `swift-build` - [the PR](https://github.com/swiftlang/swift-build/pull/1460) for this is a one liner to add `SWIFT_LOAD_BINARY_MACROS` to `ProjectModel.BuildSettings.MultipleValueSetting`. This ensures the setting survives PIF encode and decode
+* `swift-package-manager` - [the PR for this](https://github.com/swiftlang/swift-package-manager/pull/10210) is a bit more complex, but not overly so. Essentially it just hooks everything up so that the macro works in a binary artifact and the correct settings are passed to the compiler.
 
-**swift-build** ([fork](https://github.com/0xTim/swift-build/tree/feature/binary-macro-artifact-targets)):
-- One line: register `SWIFT_LOAD_BINARY_MACROS` in `ProjectModel.BuildSettings.MultipleValueSetting`
-  so the setting survives PIF encode/decode. (The engine already has the full loading machinery.)
-
-Verified end-to-end on **macOS (arm64)** and **Linux (aarch64)**, with **both** the native and
-the default SwiftBuild build engines, including consumption from a real GitHub release.
+I've tested this on both **macOS (arm64)** and **Linux (aarch64)**, with **both** the native and
+the default SwiftBuild build engines, including consumption from a real GitHub release. The PoC just vends
+the macro declaration in a target, but I've tested this via an XCFramework as well on both platforms.
 
 ## How to try it
 
@@ -111,71 +99,21 @@ fork (`swift package edit`), build `swift-run`, then `swift run --package-path R
 
 ## Alternatives considered
 
-1. **`-load-plugin-executable` via `unsafeFlags` / `OTHER_SWIFT_FLAGS`** in each consumer. Works,
-   but is per-consumer, fragile, requires hand-rolled host-variant selection, and `unsafeFlags`
-   bars the package from being a versioned dependency. This is the status-quo workaround.
-2. **Distribute the macro source** and let each consumer compile it (today's reality). Causes the
-   duplication/maintenance problem above, recompiles per consumer, and is impossible for a
-   purely-binary SDK.
-3. **Extend the XCFramework format** to carry host tools. Larger, Apple-owned format change, and
-   conceptually wrong: XCFrameworks are target-keyed, macro plugins are host-keyed. Artifact
-   bundles already solve host-keyed executable distribution.
-4. **A new manifest API / target kind** for binary macros (e.g. `.binaryMacroTarget`). More API
-   surface; the self-describing-artifact approach needs none — a plain `.binaryTarget` suffices.
-5. **Toolchain-managed prebuilts** (as swift-syntax does). That is shipped with the toolchain and
-   specific to swift-syntax; it does not let arbitrary authors publish their own macro binaries.
+There are number of alternatives that could be done instead from the fragile (setting compiler flags)
+to the very large (extending XCFrameworks) to brand new APIs. But this was a much easier, and stable
+solution.
 
-## Downsides and open questions
-
-1. **Compiler-version keying (the main open question).** A macro plugin communicates with the
-   compiler over a version-specific protocol, so a published binary is tied to a Swift toolchain
-   version. The PoC keys variants by *triple* only; a robust design should also key on **compiler
-   version** — the swift-syntax prebuilts manifest already does this and is a good model. Without
-   it, a mismatched toolchain fails at compile time (observed as "plugin produced malformed
-   response").
-2. **Two-repo coordination.** The change spans `swift-package-manager` and `swift-build`; the two
-   PRs must land together (the SwiftPM side relies on the `swift-build` setting).
-3. **SwiftBuild parser.** The PoC deliberately avoids registering the macro bundle as a build file
-   so the engine's artifact parser never has to learn the new type. Teaching the parser the
-   `macro` type directly is a cleaner alternative worth discussing.
-4. **Trust.** Consuming a macro means running a downloaded binary in the compiler's plugin sandbox
-   at build time. This is the same trust model as existing binary targets and build-tool plugins,
-   but it is worth stating explicitly for macros.
-5. **Naming expectations.** Users may expect "macros in XCFrameworks"; the implementation is a
-   sibling artifact bundle, not literally inside the XCFramework, for the host-vs-target reason
-   above.
+One interesting future direction could be the future improvements to prebuilts, but currently there
+is no way to publish your own macro binaries and these changes will still be required.
 
 ## Future directions
 
-### A first-class producer command
+Consuming these binary artifacts is pretty easy. Publishing them is a little more complicated and
+involves building for each host target and combining them together. It would be nice to eventually
+hook into the cross-compilation work and have it all done with one command, rather than hand-rolling
+the artifact (see the script in the PoC). This would be similar to how XCFrameworks are created with
+`xcodebuild`.
 
-The **consumer** side is already complete — `.binaryTarget(url:checksum:)` plus the SwiftPM
-changes, no extra tooling. The **producer** side (building the plugin and assembling the bundle)
-is currently a shell script, but most of that is scaffolding SwiftPM could own: detecting the
-host, building the `.macro` target, locating the produced plugin binary, writing the
-`.artifactbundle` layout + `info.json`, and zipping. A natural follow-on is a first-class command
-— e.g. `swift package` emitting a macro target as a single-host artifact-bundle variant together
-with its checksum — analogous to how executable tool bundles and XCFrameworks are produced today.
-That removes essentially all of the script, most notably the brittle binary-discovery logic that
-only exists because an external script has to guess where `swift build` placed the plugin.
-
-### Multi-platform bundles
-
-A single host can only produce its own variant, so a complete macOS + Linux bundle is built by
-running the per-host step on each platform and merging the variants — the same model already used
-for multi-platform XCFrameworks (`xcodebuild` per platform → `-create-xcframework`). This is
-established release engineering, not a blocker: a producer command would emit one variant per
-host, with a thin merge (or an agreed `info.json` convention) combining them.
-
-### Compiler-version-aware variants
-
-A first-class producer command is also the natural place to record the compiler version a variant
-was built with, so that variant selection — and the `info.json` schema — can key on compiler
-version in addition to triple. This is what would resolve the keying constraint under Downsides,
-mirroring the swift-syntax prebuilts manifest.
-
-## Acknowledgements / prior art
-
-* [SE‑0305 — Package Manager Binary Target Improvements](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0305-swiftpm-binary-target-improvements.md) (artifact bundles)
-* [SE‑0394 — Package Manager Support for Custom Macros](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0394-swiftpm-expression-macros.md)
-* [Swift-Syntax Prebuilts for Macros](https://forums.swift.org/t/preview-swift-syntax-prebuilts-for-macros/80202)
+Additionally the published binary is tied to a Swift toolchain version. The PoC only uses the triple to
+key variants, but something like the swift-syntax prebuilts manifest has better options to key on compiler
+version as well to avoid compile time issues due to mismatched toolchains.
