@@ -22,15 +22,31 @@ host_triple=$(swift -print-target-info | grep -m1 '"unversionedTriple"' | sed 's
 
 echo "Building ${name} plugin for ${host_triple} (${profile})..."
 swift build --package-path "${here}/MacroImpl" -c "${profile}"
+
+# Select the plugin built for THIS host. A shared .build can hold foreign-platform builds
+# (e.g. Linux artifacts left by a Docker run on the same mount), so exclude foreign-triple
+# paths — otherwise we might stage, say, a Linux ELF into the macOS slot.
+case "${host_triple}" in
+    *apple*)  foreign='linux|android|windows|wasi' ;;
+    *linux*)  foreign='apple|macosx|windows|wasi|android' ;;
+    *)        foreign='ZZZ_NO_MATCH' ;;
+esac
 plugin=$(find "${here}/MacroImpl/.build" -type f \( -name "${name}" -o -name "${name}-tool" \) 2>/dev/null \
-    | grep -v index-build | grep -v '\.dSYM' \
+    | grep -v index-build | grep -v '\.dSYM' | grep -viE "${foreign}" \
     | while IFS= read -r f; do [ -x "$f" ] && echo "$f"; done | head -1)
 [ -n "${plugin}" ] && [ -x "${plugin}" ] || { echo >&2 "Plugin executable not found"; exit 1; }
 
 mkdir -p "${bundle}/${host_triple}"
 cp "${plugin}" "${bundle}/${host_triple}/${name}"
 chmod +x "${bundle}/${host_triple}/${name}"
-echo "Staged variant: ${host_triple}/${name}"
+
+# Verify the staged binary's magic bytes match the host (catch any remaining mismatch loudly).
+magic=$(head -c4 "${bundle}/${host_triple}/${name}" | od -An -tx1 | tr -d ' \n')
+case "${host_triple}" in
+    *apple*) case "${magic}" in cffaedfe*|feedfacf*|cafebabe*) ;; *) echo >&2 "ERROR: macOS slot is not Mach-O (magic=${magic}); wrong binary selected"; exit 1 ;; esac ;;
+    *linux*) case "${magic}" in 7f454c46*) ;; *) echo >&2 "ERROR: Linux slot is not ELF (magic=${magic}); wrong binary selected"; exit 1 ;; esac ;;
+esac
+echo "Staged variant: ${host_triple}/${name} (magic=${magic})"
 
 # Regenerate info.json from all variant dirs present (so macOS + Linux runs accumulate).
 variants=$(
