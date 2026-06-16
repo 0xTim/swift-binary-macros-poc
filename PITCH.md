@@ -145,6 +145,35 @@ fork (`swift package edit`), build `swift-run`, then `swift run --package-path R
    sibling artifact bundle, not literally inside the XCFramework, for the host-vs-target reason
    above.
 
+## Future directions
+
+### A first-class producer command
+
+The **consumer** side is already complete — `.binaryTarget(url:checksum:)` plus the SwiftPM
+changes, no extra tooling. The **producer** side (building the plugin and assembling the bundle)
+is currently a shell script, but most of that is scaffolding SwiftPM could own: detecting the
+host, building the `.macro` target, locating the produced plugin binary, writing the
+`.artifactbundle` layout + `info.json`, and zipping. A natural follow-on is a first-class command
+— e.g. `swift package` emitting a macro target as a single-host artifact-bundle variant together
+with its checksum — analogous to how executable tool bundles and XCFrameworks are produced today.
+That removes essentially all of the script, most notably the brittle binary-discovery logic that
+only exists because an external script has to guess where `swift build` placed the plugin.
+
+### Multi-platform bundles
+
+A single host can only produce its own variant, so a complete macOS + Linux bundle is built by
+running the per-host step on each platform and merging the variants — the same model already used
+for multi-platform XCFrameworks (`xcodebuild` per platform → `-create-xcframework`). This is
+established release engineering, not a blocker: a producer command would emit one variant per
+host, with a thin merge (or an agreed `info.json` convention) combining them.
+
+### Compiler-version-aware variants
+
+A first-class producer command is also the natural place to record the compiler version a variant
+was built with, so that variant selection — and the `info.json` schema — can key on compiler
+version in addition to triple. This is what would resolve the keying constraint under Downsides,
+mirroring the swift-syntax prebuilts manifest.
+
 ## Acknowledgements / prior art
 
 * [SE‑0305 — Package Manager Binary Target Improvements](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0305-swiftpm-binary-target-improvements.md) (artifact bundles)

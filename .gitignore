@@ -2,3 +2,4 @@
 dist/
 Package.resolved
 *.artifactbundle
+.vscode/
