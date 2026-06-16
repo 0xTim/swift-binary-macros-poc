@@ -1,0 +1,122 @@
+diff --git a/Sources/Build/BuildDescription/SwiftModuleBuildDescription.swift b/Sources/Build/BuildDescription/SwiftModuleBuildDescription.swift
+index 85ef4ed..c5e47d5 100644
+--- a/Sources/Build/BuildDescription/SwiftModuleBuildDescription.swift
++++ b/Sources/Build/BuildDescription/SwiftModuleBuildDescription.swift
+@@ -246,6 +246,18 @@ public final class SwiftModuleBuildDescription {
+         }
+     }
+ 
++    /// Binary dependencies that vend prebuilt macro plugin executables (an artifact bundle
++    /// containing a `macro`-typed artifact), as opposed to `.macro` targets built from source.
++    public var requiredBinaryMacros: [BinaryModule] {
++        get throws {
++            try self.target.recursiveModuleDependencies().compactMap {
++                guard $0.type == .binary, let binary = $0.underlying as? BinaryModule,
++                      binary.containsMacro else { return nil }
++                return binary
++            }
++        }
++    }
++
+     /// ObservabilityScope with which to emit diagnostics
+     private let observabilityScope: ObservabilityScope
+ 
+@@ -470,6 +482,22 @@ public final class SwiftModuleBuildDescription {
+         }
+         #endif
+ 
++        // Prebuilt macro plugins shipped as binary artifact bundles. These are host tools, so
++        // their variants are selected against the host (macro build) triple. The artifact key is
++        // used as the plugin module name, matching the `module:` of the `#externalMacro` decl.
++        try self.requiredBinaryMacros.forEach { binaryMacro in
++            let macros = try binaryMacro.parseMacroArtifactArchives(
++                for: macroBuildParameters.triple,
++                fileSystem: self.fileSystem
++            )
++            for macro in macros where !macro.supportedTriples.isEmpty {
++                args += [
++                    "-Xfrontend", "-load-plugin-executable",
++                    "-Xfrontend", "\(macro.executablePath.pathString)#\(macro.name)",
++                ]
++            }
++        }
++
+         if self.shouldDisableSandbox {
+             let toolchainSupportsDisablingSandbox = DriverSupport.checkSupportedFrontendFlags(
+                 flags: ["-disable-sandbox"],
+diff --git a/Sources/PackageModel/ArtifactsArchiveMetadata.swift b/Sources/PackageModel/ArtifactsArchiveMetadata.swift
+index 4527640..bbc6840 100644
+--- a/Sources/PackageModel/ArtifactsArchiveMetadata.swift
++++ b/Sources/PackageModel/ArtifactsArchiveMetadata.swift
+@@ -44,6 +44,10 @@ public struct ArtifactsArchiveMetadata: Equatable {
+     // 3D models along with associated textures, or fonts, etc.
+     public enum ArtifactType: String, RawRepresentable, Decodable {
+         case executable
++        /// A compiler plugin executable that implements a Swift macro, to be loaded by the
++        /// compiler via `-load-plugin-executable`. Like `executable`, variants are keyed by
++        /// the host triple (the platform performing the compilation), not the build target.
++        case macro
+         case staticLibrary
+         case swiftSDK
+         // Experimental support for Windows DLLs
+diff --git a/Sources/PackageModel/Module/BinaryModule.swift b/Sources/PackageModel/Module/BinaryModule.swift
+index 31d47fb..6d47dcb 100644
+--- a/Sources/PackageModel/Module/BinaryModule.swift
++++ b/Sources/PackageModel/Module/BinaryModule.swift
+@@ -97,6 +97,18 @@ public final class BinaryModule: Module {
+         }
+     }
+ 
++    /// Whether this binary artifact provides one or more prebuilt macro plugin executables.
++    public var containsMacro: Bool {
++        switch self.kind {
++        case .xcframework:
++            return false
++        case .artifactsArchive(let types):
++            return types.contains(.macro)
++        case .unknown:
++            return false
++        }
++    }
++
+     public enum Origin: Equatable {
+ 
+         /// Represents an artifact that was downloaded from a remote URL.
+diff --git a/Sources/SPMBuildCore/BinaryTarget+Extensions.swift b/Sources/SPMBuildCore/BinaryTarget+Extensions.swift
+index 2b43741..7c31b2a 100644
+--- a/Sources/SPMBuildCore/BinaryTarget+Extensions.swift
++++ b/Sources/SPMBuildCore/BinaryTarget+Extensions.swift
+@@ -97,6 +97,33 @@ extension BinaryModule {
+         }
+     }
+ 
++    /// Parses the prebuilt macro plugin executables in this artifact bundle, selecting the
++    /// variant(s) matching the given host `triple`. Mirrors `parseExecutableArtifactArchives`
++    /// but filters for the `.macro` artifact type. The returned `ExecutableInfo.name` is the
++    /// artifact key, which doubles as the macro plugin module name passed to the compiler.
++    public func parseMacroArtifactArchives(for triple: Triple, fileSystem: any FileSystem) throws -> [ExecutableInfo] {
++        // The host triple might contain a version which we don't want to take into account here.
++        let versionLessTriple = try triple.withoutVersion()
++        let metadata = try ArtifactsArchiveMetadata.parse(fileSystem: fileSystem, rootPath: self.artifactPath)
++        // Filter out everything except macro plugins.
++        let macros = metadata.artifacts.filter { $0.value.type == .macro }
++        // Construct an ExecutableInfo for each matching variant.
++        return try macros.flatMap { entry in
++            try entry.value.variants.map {
++                guard let supportedTriples = $0.supportedTriples else {
++                    throw StringError("No \"supportedTriples\" found in the artifact metadata for \(entry.key) in \(self.artifactPath)")
++                }
++                let filteredSupportedTriples = try supportedTriples
++                    .filter { try $0.withoutVersion() == versionLessTriple }
++                return ExecutableInfo(
++                    name: entry.key,
++                    executablePath: self.artifactPath.appending($0.path),
++                    supportedTriples: filteredSupportedTriples
++                )
++            }
++        }
++    }
++
+     public func parseWindowsDLLArtifactArchives(for triple: Triple, fileSystem: any FileSystem) throws -> [WindowsDLLInfo] {
+         // The host triple might contain a version which we don't want to take into account here.
+         let versionLessTriple = try triple.withoutVersion()
